@@ -8,17 +8,30 @@
 
 #import "PVGame.h"
 
-
 @implementation PVGame
 
-@dynamic title;
-@dynamic romPath;
-@dynamic originalArtworkURL;
-@dynamic artworkURL;
-@dynamic crc32;
-@dynamic md5;
-@dynamic requiresSync;
-@dynamic systemIdentifier;
-@dynamic isSyncing;
++ (NSDictionary *)defaultPropertyValues
+{
+    return @{@"title" : @"",
+             @"romPath" : @"",
+             @"customArtworkURL" : @"",
+             @"originalArtworkURL" : @"",
+             @"md5Hash" : @"",
+             @"requiresSync" : @YES,
+             @"systemIdentifier" : @"",
+             @"isFavorite": @NO};
+}
+
++ (NSArray<NSString *> *)requiredProperties
+{
+	// All properties are required
+	return @[@"title",
+			 @"romPath",
+			 @"customArtworkURL",
+			 @"originalArtworkURL",
+			 @"md5Hash",
+			 @"systemIdentifier",
+             @"isFavorite"];
+}
 
 @end

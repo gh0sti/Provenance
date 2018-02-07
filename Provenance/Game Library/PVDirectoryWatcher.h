@@ -8,14 +8,20 @@
 
 #import <Foundation/Foundation.h>
 
-typedef void(^PVDirectoryChangedHandler)(void);
+extern NSString *PVArchiveInflationFailedNotification;
+
+typedef void(^PVExtractionStartedHandler)(NSString *path);
+typedef void(^PVExtractionUpdatedHandler)(NSString *path, NSInteger entryNumber, NSInteger total, float progress);
+typedef void(^PVExtractionCompleteHandler)(NSArray *paths);
 
 @interface PVDirectoryWatcher : NSObject
 
-@property (nonatomic, readonly) NSString *path;
-@property (nonatomic, readonly) PVDirectoryChangedHandler directoryChangedHandler;
+@property (nonatomic, readonly, copy) NSString *path;
+@property (nonatomic, readonly, copy) PVExtractionStartedHandler extractionStartedHandler;
+@property (nonatomic, readonly, copy) PVExtractionUpdatedHandler extractionUpdatedHandler;
+@property (nonatomic, readonly, copy) PVExtractionCompleteHandler extractionCompleteHandler;
 
-- (id)initWithPath:(NSString *)path directoryChangedHandler:(PVDirectoryChangedHandler)handler;
+- (id)initWithPath:(NSString *)path extractionStartedHandler:(PVExtractionStartedHandler)startedHandler extractionUpdatedHandler:(PVExtractionUpdatedHandler)updatedHandler extractionCompleteHandler:(PVExtractionCompleteHandler)completeHandler;
 
 - (void)startMonitoring;
 - (void)stopMonitoring;

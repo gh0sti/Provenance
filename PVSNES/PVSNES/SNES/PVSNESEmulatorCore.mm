@@ -26,9 +26,10 @@
  */
 
 #import "PVSNESEmulatorCore.h"
-#import "OERingBuffer.h"
-#import "OETimingUtils.h"
+#import <PVSupport/OERingBuffer.h>
+#import <PVSupport/PVGameControllerUtilities.h>
 #import <OpenGLES/EAGL.h>
+#import <OpenGLES/ES3/gl.h>
 
 #include "memmap.h"
 #include "pixform.h"
@@ -47,16 +48,29 @@
 #import <AudioUnit/AudioUnit.h>
 #include <pthread.h>
 
-#define SAMPLERATE      48000
+#define SAMPLERATE      32000
 #define SIZESOUNDBUFFER SAMPLERATE / 50 * 4
 
-@interface PVSNESEmulatorCore ()
-{
+static __weak PVSNESEmulatorCore *_current;
+
+@interface PVSNESEmulatorCore () {
+
+@public
     UInt16        *soundBuffer;
     unsigned char *videoBuffer;
+    unsigned char *videoBufferA;
+    unsigned char *videoBufferB;
 }
 
 @end
+
+bool8 S9xDeinitUpdate(int width, int height)
+{
+    __strong PVSNESEmulatorCore *strongCurrent = _current;
+    [strongCurrent flipBuffers];
+
+    return true;
+}
 
 NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", @"X", @"Y", @"L", @"R", @"Start", @"Select", nil };
 
@@ -68,6 +82,7 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
 	{
 		soundBuffer = (UInt16 *)malloc(SIZESOUNDBUFFER * sizeof(UInt16));
 		memset(soundBuffer, 0, SIZESOUNDBUFFER * sizeof(UInt16));
+        _current = self;
 	}
 	
 	return self;
@@ -75,8 +90,13 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
 
 - (void)dealloc
 {
-    free(videoBuffer);
+    free(videoBufferA);
+    videoBufferA = NULL;
+    free(videoBufferB);
+    videoBufferB = NULL;
+    videoBuffer = NULL;
     free(soundBuffer);
+    soundBuffer = NULL;
 }
 
 #pragma mark Exectuion
@@ -92,86 +112,27 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
     NSString *extensionlessFilename = [[path lastPathComponent] stringByDeletingPathExtension];
 	
     NSString *batterySavesDirectory = [self batterySavesPath];
+    
+    [super stopEmulation];
 	
     if([batterySavesDirectory length] != 0)
     {
 		
         [[NSFileManager defaultManager] createDirectoryAtPath:batterySavesDirectory withIntermediateDirectories:YES attributes:nil error:NULL];
 		
-        NSLog(@"Trying to save SRAM");
+        DLog(@"Trying to save SRAM");
 		
         NSString *filePath = [batterySavesDirectory stringByAppendingPathComponent:[extensionlessFilename stringByAppendingPathExtension:@"sav"]];
 		
         Memory.SaveSRAM([filePath UTF8String]);
     }
 	
-    [super stopEmulation];
-}
-
-- (void)frameRefreshThread:(id)anArgument
-{
-	gameInterval = 1.0 / [self frameInterval];
-	NSTimeInterval gameTime = OEMonotonicTime();
-	
-	/*
-	 Calling OEMonotonicTime() from the base class implementation
-	 of this method causes it to return a garbage value similar
-	 to 1.52746e+9 which, in turn, causes OEWaitUntil to wait forever.
-	 
-	 Calculating the absolute time in the base class implementation
-	 without using OETimingUtils yields an expected value.
-	 
-	 However, calculating the absolute time while in the base class
-	 implementation seems to have a performance hit effect as
-	 emulation is not as fast as it should be when running on a device,
-	 causing audio and video glitches, but appears fine in the simulator
-	 (no doubt because it's on a faster CPU).
-	 
-	 Calling OEMonotonicTime() from any subclass implementation of
-	 this method also yields the expected value, and results in
-	 expected emulation speed.
-	 
-	 I am unable to understand or explain why this occurs. I am obviously
-	 missing some vital information relating to this issue.
-	 Perhaps someone more knowledgable than myself can explain and/or fix this.
-	 */
-	
-//	struct mach_timebase_info timebase;
-//	mach_timebase_info(&timebase);
-//	double toSec = 1e-09 * (timebase.numer / timebase.denom);
-//	NSTimeInterval gameTime = mach_absolute_time() * toSec;
-	
-	OESetThreadRealtime(gameInterval, 0.007, 0.03); // guessed from bsnes
-	while (!shouldStop)
-	{
-		if (self.shouldResyncTime)
-		{
-			self.shouldResyncTime = NO;
-			gameTime = OEMonotonicTime();
-		}
-		
-		gameTime += gameInterval;
-		
-		@autoreleasepool
-		{
-			if (isRunning)
-			{
-				[self executeFrame];
-			}
-		}
-		
-		OEWaitUntil(gameTime);
-//		mach_wait_until(gameTime / toSec);
-	}
 }
 
 - (void)executeFrame
 {
     IPPU.RenderThisFrame = YES;
     S9xMainLoop();
-
-    S9xMixSamples((unsigned char *)soundBuffer, (SAMPLERATE / [self frameInterval]) * [self channelCount]);
-    [[self ringBufferAtIndex:0] write:soundBuffer maxLength:sizeof(UInt16) * [self channelCount] * (SAMPLERATE / [self frameInterval])];
 }
 
 - (BOOL)loadFileAtPath:(NSString *)path
@@ -189,7 +150,7 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
     Settings.JustifierMaster        = true;
     Settings.BlockInvalidVRAMAccess = true;
     Settings.HDMATimingHack         = 100;
-    Settings.SoundPlaybackRate      = 48000;
+    Settings.SoundPlaybackRate      = SAMPLERATE;
     Settings.Stereo                 = true;
     Settings.SixteenBitSound        = true;
     Settings.Transparency           = true;
@@ -202,17 +163,26 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
     //Settings.AutoDisplayMessages    = true;
     //Settings.FrameTimeNTSC          = 16667;
 
-    if(videoBuffer) free(videoBuffer);
+    if (videoBufferA)
+    {
+        free(videoBufferA);
+    }
+    
+    if (videoBufferB)
+    {
+        free(videoBufferB);
+    }
 
-    videoBuffer = (unsigned char *)malloc(MAX_SNES_WIDTH * MAX_SNES_HEIGHT * sizeof(uint16_t));
+    videoBuffer = NULL;
+    videoBufferA = (unsigned char *)malloc(MAX_SNES_WIDTH * MAX_SNES_HEIGHT * sizeof(uint16_t));
+    videoBufferB = (unsigned char *)malloc(MAX_SNES_WIDTH * MAX_SNES_HEIGHT * sizeof(uint16_t));
     //GFX.PixelFormat = 3;
 
     GFX.Pitch = 512 * 2;
     //GFX.PPL = SNES_WIDTH;
-    GFX.Screen = (short unsigned int *)videoBuffer;
+    GFX.Screen = (short unsigned int *)videoBufferA;
 
     S9xUnmapAllControls();
-
     [self mapButtons];
 
     S9xSetController(0, CTL_JOYPAD, 0, 0, 0, 0);
@@ -221,17 +191,21 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
     //S9xSetRenderPixelFormat(RGB565);
     if(!Memory.Init() || !S9xInitAPU() || !S9xGraphicsInit())
     {
-        NSLog(@"Couldn't init");
+        DLog(@"Couldn't init");
         return NO;
     }
 
-    NSLog(@"loading %@", path);
+    DLog(@"loading %@", path);
 
     /* buffer_ms : buffer size given in millisecond
      lag_ms    : allowable time-lag given in millisecond
      S9xInitSound(macSoundBuffer_ms, macSoundLagEnable ? macSoundBuffer_ms / 2 : 0); */
-    if(!S9xInitSound(SIZESOUNDBUFFER, 0))
-        NSLog(@"Couldn't init sound");
+    if(!S9xInitSound(100, 0))
+    {
+        DLog(@"Couldn't init sound");
+    }
+
+    S9xSetSamplesAvailableCallback(FinalizeSamplesAudioCallback, NULL);
 
     Settings.NoPatch = true;
     Settings.BSXBootup = false;
@@ -242,17 +216,16 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
         NSString *extensionlessFilename = [[path lastPathComponent] stringByDeletingPathExtension];
 
         NSString *batterySavesDirectory = [self batterySavesPath];
-
-        //if((batterySavesDirectory != nil) && ![batterySavesDirectory isEqualToString:@""])
-        if([batterySavesDirectory length] != 0)
+        
+        if([batterySavesDirectory length])
         {
             [[NSFileManager defaultManager] createDirectoryAtPath:batterySavesDirectory withIntermediateDirectories:YES attributes:nil error:NULL];
-
+            
             NSString *filePath = [batterySavesDirectory stringByAppendingPathComponent:[extensionlessFilename stringByAppendingPathExtension:@"sav"]];
-
+            
             Memory.LoadSRAM([filePath UTF8String]);
         }
-
+        
         return YES;
     }
 
@@ -261,9 +234,23 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
 
 #pragma mark Video
 
-- (uint16_t *)videoBuffer
+- (void)flipBuffers
 {
-    return GFX.Screen;
+    if (GFX.Screen == (short unsigned int *)videoBufferA)
+    {
+        videoBuffer = videoBufferA;
+        GFX.Screen = (short unsigned int *)videoBufferB;
+    }
+    else
+    {
+        videoBuffer = videoBufferB;
+        GFX.Screen = (short unsigned int *)videoBufferA;
+    }
+}
+
+- (const void *)videoBuffer
+{
+    return videoBuffer;
 }
 
 - (CGRect)screenRect
@@ -298,7 +285,7 @@ NSString *SNESEmulatorKeys[] = { @"Up", @"Down", @"Left", @"Right", @"A", @"B", 
 
 - (NSTimeInterval)frameInterval
 {
-    return Settings.PAL ? 50 : 60;
+    return Settings.PAL ? 50 : 60.098;
 }
 
 #pragma mark Audio
@@ -308,14 +295,19 @@ bool8 S9xOpenSoundDevice(void)
 	return true;
 }
 
+static void FinalizeSamplesAudioCallback(void *)
+{
+    __strong PVSNESEmulatorCore *strongCurrent = _current;
+    
+    S9xFinalizeSamples();
+    int samples = S9xGetSampleCount();
+    S9xMixSamples((uint8_t*)strongCurrent->soundBuffer, samples);
+    [[strongCurrent ringBufferAtIndex:0] write:strongCurrent->soundBuffer maxLength:samples * 2];
+}
+
 - (double)audioSampleRate
 {
     return SAMPLERATE;
-}
-
-- (NSUInteger)audioBufferCount
-{
-	return 1;
 }
 
 - (NSUInteger)channelCount
@@ -326,12 +318,16 @@ bool8 S9xOpenSoundDevice(void)
 #pragma mark Save States
 - (BOOL)saveStateToFileAtPath: (NSString *) fileName
 {
-    return S9xFreezeGame([fileName UTF8String]) ? YES : NO;
+    @synchronized(self) {
+        return S9xFreezeGame([fileName UTF8String]) ? YES : NO;
+    }
 }
 
 - (BOOL)loadStateFromFileAtPath: (NSString *) fileName
 {
-    return S9xUnfreezeGame([fileName UTF8String]) ? YES : NO;
+    @synchronized(self) {
+        return S9xUnfreezeGame([fileName UTF8String]) ? YES : NO;
+    }
 }
 
 #pragma mark - Cheats
@@ -360,14 +356,14 @@ bool8 S9xOpenSoundDevice(void)
 
 #pragma mark - Input
 
-- (void)pushSNESButton:(PVSNESButton)button
+- (void)pushSNESButton:(PVSNESButton)button forPlayer:(NSInteger)player
 {
-    S9xReportButton((1 << 16) | button, true);
+    S9xReportButton((player+1 << 16) | button, true);
 }
 
-- (void)releaseSNESButton:(PVSNESButton)button
+- (void)releaseSNESButton:(PVSNESButton)button forPlayer:(NSInteger)player
 {
-    S9xReportButton((1 << 16) | button, false);
+    S9xReportButton((player+1 << 16) | button, false);
 }
 
 - (void)mapButtons
@@ -383,6 +379,82 @@ bool8 S9xOpenSoundDevice(void)
             s9xcommand_t cmd = S9xGetCommandT([[playerString stringByAppendingString:SNESEmulatorKeys[idx]] UTF8String]);
             S9xMapButton(playerMask | idx, cmd, false);
         }
+    }
+}
+
+- (void)updateControllers
+{
+    GCController *controller = nil;
+
+    for (NSInteger player = 1; player <= 2; player++)
+    {
+        NSUInteger playerMask = player << 16;
+        GCController *controller = (player == 1) ? self.controller1 : self.controller2;
+
+        if ([controller extendedGamepad])
+        {
+            GCExtendedGamepad *pad = [controller extendedGamepad];
+            GCControllerDirectionPad *dpad = [pad dpad];
+
+            PVControllerAxisDirection axisDirection = [PVGameControllerUtilities axisDirectionForThumbstick:pad.leftThumbstick];
+
+            BOOL upPressed = dpad.up.pressed || axisDirection == PVControllerAxisDirectionUp || axisDirection == PVControllerAxisDirectionUpLeft || axisDirection == PVControllerAxisDirectionUpRight;
+            S9xReportButton(playerMask | PVSNESButtonUp, upPressed);
+            
+            BOOL downPressed = dpad.down.pressed || axisDirection == PVControllerAxisDirectionDown || axisDirection == PVControllerAxisDirectionDownLeft || axisDirection == PVControllerAxisDirectionDownRight;
+            S9xReportButton(playerMask | PVSNESButtonDown, downPressed);
+            
+            BOOL leftPressed = dpad.left.pressed || axisDirection == PVControllerAxisDirectionLeft || axisDirection == PVControllerAxisDirectionUpLeft || axisDirection == PVControllerAxisDirectionDownLeft;
+            S9xReportButton(playerMask | PVSNESButtonLeft, leftPressed);
+            
+            BOOL rightPressed = dpad.right.pressed || axisDirection == PVControllerAxisDirectionRight || axisDirection == PVControllerAxisDirectionUpRight || axisDirection == PVControllerAxisDirectionDownRight;
+            S9xReportButton(playerMask | PVSNESButtonRight, rightPressed);
+
+            S9xReportButton(playerMask | PVSNESButtonB, pad.buttonA.pressed);
+            S9xReportButton(playerMask | PVSNESButtonA, pad.buttonB.pressed);
+            S9xReportButton(playerMask | PVSNESButtonY, pad.buttonX.pressed);
+            S9xReportButton(playerMask | PVSNESButtonX, pad.buttonY.pressed);
+
+            S9xReportButton(playerMask | PVSNESButtonTriggerLeft, pad.leftShoulder.pressed);
+            S9xReportButton(playerMask | PVSNESButtonTriggerRight, pad.rightShoulder.pressed);
+
+            S9xReportButton(playerMask | PVSNESButtonStart, pad.leftTrigger.pressed);
+            S9xReportButton(playerMask | PVSNESButtonSelect, pad.rightTrigger.pressed);
+
+        }
+        else if ([controller gamepad])
+        {
+            GCGamepad *pad = [controller gamepad];
+            GCControllerDirectionPad *dpad = [pad dpad];
+
+            S9xReportButton(playerMask | PVSNESButtonUp, dpad.up.pressed);
+            S9xReportButton(playerMask | PVSNESButtonDown, dpad.down.pressed);
+            S9xReportButton(playerMask | PVSNESButtonLeft, dpad.left.pressed);
+            S9xReportButton(playerMask | PVSNESButtonRight, dpad.right.pressed);
+
+            S9xReportButton(playerMask | PVSNESButtonB, pad.buttonA.pressed);
+            S9xReportButton(playerMask | PVSNESButtonA, pad.buttonB.pressed);
+            S9xReportButton(playerMask | PVSNESButtonY, pad.buttonX.pressed);
+            S9xReportButton(playerMask | PVSNESButtonX, pad.buttonY.pressed);
+
+            S9xReportButton(playerMask | PVSNESButtonTriggerLeft, pad.leftShoulder.pressed);
+            S9xReportButton(playerMask | PVSNESButtonTriggerRight, pad.rightShoulder.pressed);
+        }
+#if TARGET_OS_TV
+        else if ([controller microGamepad])
+        {
+            GCMicroGamepad *pad = [controller microGamepad];
+            GCControllerDirectionPad *dpad = [pad dpad];
+
+            S9xReportButton(playerMask | PVSNESButtonUp, dpad.up.value > 0.5);
+            S9xReportButton(playerMask | PVSNESButtonDown, dpad.down.value > 0.5);
+            S9xReportButton(playerMask | PVSNESButtonLeft, dpad.left.value > 0.5);
+            S9xReportButton(playerMask | PVSNESButtonRight, dpad.right.value > 0.5);
+
+            S9xReportButton(playerMask | PVSNESButtonB, pad.buttonA.pressed);
+            S9xReportButton(playerMask | PVSNESButtonA, pad.buttonX.pressed);
+        }
+#endif
     }
 }
 

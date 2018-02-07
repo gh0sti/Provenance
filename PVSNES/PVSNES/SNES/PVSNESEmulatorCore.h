@@ -26,7 +26,7 @@
  */
 
 #import <Foundation/Foundation.h>
-#import "PVEmulatorCore.h"
+#import <PVSupport/PVEmulatorCore.h>
 
 
 typedef NS_ENUM(NSUInteger, PVSNESButton)
@@ -48,7 +48,8 @@ typedef NS_ENUM(NSUInteger, PVSNESButton)
 
 @interface PVSNESEmulatorCore : PVEmulatorCore
 
-- (void)pushSNESButton:(PVSNESButton)button;
-- (void)releaseSNESButton:(PVSNESButton)button;
+- (void)pushSNESButton:(PVSNESButton)button forPlayer:(NSInteger)player;
+- (void)releaseSNESButton:(PVSNESButton)button forPlayer:(NSInteger)player;
+- (void)flipBuffers;
 
 @end

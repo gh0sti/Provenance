@@ -7,10 +7,10 @@
 //
 
 #import "PVGenesisEmulatorCore.h"
-#import "libretro.h"
-#import "OERingBuffer.h"
-#import "OETimingUtils.h"
+#import <PVSupport/OERingBuffer.h>
+#import <PVSupport/DebugUtils.h>
 #import <OpenGLES/EAGL.h>
+#import <OpenGLES/ES3/gl.h>
 
 @interface PVGenesisEmulatorCore ()
 {
@@ -21,7 +21,6 @@
 
 @end
 
-NSUInteger _GenesisEmulatorValues[] = { RETRO_DEVICE_ID_JOYPAD_UP, RETRO_DEVICE_ID_JOYPAD_DOWN, RETRO_DEVICE_ID_JOYPAD_LEFT, RETRO_DEVICE_ID_JOYPAD_RIGHT, RETRO_DEVICE_ID_JOYPAD_Y, RETRO_DEVICE_ID_JOYPAD_B, RETRO_DEVICE_ID_JOYPAD_A, RETRO_DEVICE_ID_JOYPAD_L, RETRO_DEVICE_ID_JOYPAD_X, RETRO_DEVICE_ID_JOYPAD_R, RETRO_DEVICE_ID_JOYPAD_START, RETRO_DEVICE_ID_JOYPAD_SELECT };
 __weak PVGenesisEmulatorCore *_current;
 
 @implementation PVGenesisEmulatorCore
@@ -68,41 +67,58 @@ static void video_callback(const void *data, unsigned width, unsigned height, si
 
 static void input_poll_callback(void)
 {
-	//NSLog(@"poll callback");
+	//DLog(@"poll callback");
 }
 
 static int16_t input_state_callback(unsigned port, unsigned device, unsigned index, unsigned _id)
 {
-	//NSLog(@"polled input: port: %d device: %d id: %d", port, device, id);
+	//DLog(@"polled input: port: %d device: %d id: %d", port, device, id);
 	
 	__strong PVGenesisEmulatorCore *strongCurrent = _current;
-	
-	if (port == 0 & device == RETRO_DEVICE_JOYPAD)
+    int16_t value = 0;
+
+    if (port == 0 & device == RETRO_DEVICE_JOYPAD)
 	{
-		return strongCurrent->_pad[0][_id];
+        if (strongCurrent.controller1)
+        {
+            value = [strongCurrent controllerValueForButtonID:_id forPlayer:port];
+        }
+
+        if (value == 0)
+        {
+            value = strongCurrent->_pad[0][_id];
+        }
 	}
 	else if(port == 1 & device == RETRO_DEVICE_JOYPAD)
 	{
-		return strongCurrent->_pad[1][_id];
+        if (strongCurrent.controller2)
+        {
+            value = [strongCurrent controllerValueForButtonID:_id forPlayer:port];
+        }
+
+        if (value == 0)
+        {
+            value = strongCurrent->_pad[1][_id];
+        }
 	}
 	
 	strongCurrent = nil;
 	
-	return 0;
+	return value;
 }
 
 static bool environment_callback(unsigned cmd, void *data)
 {
+    __strong PVGenesisEmulatorCore *strongCurrent = _current;
+    
 	switch(cmd)
 	{
 		case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY :
 		{
-			NSString *appSupportPath = [NSString pathWithComponents:@[
-										[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject],
-										@"BIOS"]];
+			NSString *appSupportPath = [strongCurrent BIOSPath];
 			
 			*(const char **)data = [appSupportPath UTF8String];
-			NSLog(@"Environ SYSTEM_DIRECTORY: \"%@\".\n", appSupportPath);
+			DLog(@"Environ SYSTEM_DIRECTORY: \"%@\".\n", appSupportPath);
 			break;
 		}
 		case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
@@ -110,10 +126,12 @@ static bool environment_callback(unsigned cmd, void *data)
 			break;
 		}
 		default :
-			NSLog(@"Environ UNSUPPORTED (#%u).\n", cmd);
+			DLog(@"Environ UNSUPPORTED (#%u).\n", cmd);
 			return false;
 	}
 	
+    strongCurrent = nil;
+    
 	return true;
 }
 
@@ -160,63 +178,6 @@ static bool environment_callback(unsigned cmd, void *data)
 	});
 }
 
-- (void)frameRefreshThread:(id)anArgument
-{
-	gameInterval = 1.0 / [self frameInterval];
-	NSTimeInterval gameTime = OEMonotonicTime();
-	
-	/*
-	 Calling OEMonotonicTime() from the base class implementation
-	 of this method causes it to return a garbage value similar
-	 to 1.52746e+9 which, in turn, causes OEWaitUntil to wait forever.
-	 
-	 Calculating the absolute time in the base class implementation
-	 without using OETimingUtils yields an expected value.
-	 
-	 However, calculating the absolute time while in the base class
-	 implementation seems to have a performance hit effect as 
-	 emulation is not as fast as it should be when running on a device,
-	 causing audio and video glitches, but appears fine in the simulator
-	 (no doubt because it's on a faster CPU).
-	 
-	 Calling OEMonotonicTime() from any subclass implementation of
-	 this method also yields the expected value, and results in
-	 expected emulation speed.
-	 
-	 I am unable to understand or explain why this occurs. I am obviously
-	 missing some vital information relating to this issue.
-	 Perhaps someone more knowledgable than myself can explain and/or fix this.
-	 */
-	
-////	struct mach_timebase_info timebase;
-////	mach_timebase_info(&timebase);
-////	double toSec = 1e-09 * (timebase.numer / timebase.denom);
-////	NSTimeInterval gameTime = mach_absolute_time() * toSec;
-	
-	OESetThreadRealtime(gameInterval, 0.007, 0.03); // guessed from bsnes
-	while (!shouldStop)
-	{
-		if (self.shouldResyncTime)
-		{
-			self.shouldResyncTime = NO;
-			gameTime = OEMonotonicTime();
-		}
-		
-		gameTime += gameInterval;
-		
-		@autoreleasepool
-		{
-			if (isRunning)
-			{
-				[self executeFrame];
-			}
-		}
-		
-		OEWaitUntil(gameTime);
-//		mach_wait_until(gameTime / toSec);
-	}
-}
-
 - (void)executeFrame
 {
 	retro_run();
@@ -228,7 +189,7 @@ static bool environment_callback(unsigned cmd, void *data)
     
     const void *data;
     size_t size;
-    self.romName = [[[path lastPathComponent] componentsSeparatedByString:@"."] objectAtIndex:0];;
+    self.romName = [[[path lastPathComponent] componentsSeparatedByString:@"."] objectAtIndex:0];
     
     //load cart, read bytes, get length
     NSData* dataObj = [NSData dataWithContentsOfFile:[path stringByStandardizingPath]];
@@ -285,21 +246,21 @@ static bool environment_callback(unsigned cmd, void *data)
 
 - (void)loadSaveFile:(NSString *)path forType:(int)type
 {
-	size_t size = retro_get_memory_size(type);
-	void *ramData = retro_get_memory_data(type);
-	
-	if (size == 0 || !ramData)
-	{
-		return;
-	}
-	
-	NSData *data = [NSData dataWithContentsOfFile:path];
-	if (!data || ![data length])
-	{
-		NSLog(@"Couldn't load save file.");
-	}
-	
-	[data getBytes:ramData length:size];
+    size_t size = retro_get_memory_size(type);
+    void *ramData = retro_get_memory_data(type);
+    
+    if (size == 0 || !ramData)
+    {
+        return;
+    }
+    
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data || ![data length])
+    {
+        DLog(@"Couldn't load save file.");
+    }
+    
+    [data getBytes:ramData length:size];
 }
 
 - (void)writeSaveFile:(NSString *)path forType:(int)type
@@ -309,19 +270,19 @@ static bool environment_callback(unsigned cmd, void *data)
     
     if (ramData && (size > 0))
     {
-		retro_serialize(ramData, size);
-		NSData *data = [NSData dataWithBytes:ramData length:size];
-		BOOL success = [data writeToFile:path atomically:YES];
-		if (!success)
-		{
-			NSLog(@"Error writing save file");
-		}
+        retro_serialize(ramData, size);
+        NSData *data = [NSData dataWithBytes:ramData length:size];
+        BOOL success = [data writeToFile:path atomically:YES];
+        if (!success)
+        {
+            DLog(@"Error writing save file");
+        }
     }
 }
 
 #pragma mark - Video
 
-- (uint16_t *)videoBuffer
+- (const void *)videoBuffer
 {
 	return _videoBuffer;
 }
@@ -373,63 +334,168 @@ static bool environment_callback(unsigned cmd, void *data)
     return 2;
 }
 
-- (NSUInteger)audioBufferCount
-{
-    return 1;
-}
-
 #pragma mark - Input
 
-- (void)pushGenesisButton:(PVGenesisButton)button
+- (void)pushGenesisButton:(PVGenesisButton)button forPlayer:(NSInteger)player
 {
-	_pad[0][_GenesisEmulatorValues[button]] = 1;
+	_pad[player][button] = 1;
 }
 
-- (void)releaseGenesisButton:(PVGenesisButton)button
+- (void)releaseGenesisButton:(PVGenesisButton)button forPlayer:(NSInteger)player
 {
-	_pad[0][_GenesisEmulatorValues[button]] = 0;
+	_pad[player][button] = 0;
+}
+
+- (NSInteger)controllerValueForButtonID:(unsigned)buttonID forPlayer:(NSInteger)player
+{
+    GCController *controller = nil;
+
+    if (player == 0)
+    {
+        controller = self.controller1;
+    }
+    else
+    {
+        controller = self.controller2;
+    }
+
+    if ([controller extendedGamepad])
+    {
+        GCExtendedGamepad *pad = [controller extendedGamepad];
+        GCControllerDirectionPad *dpad = [pad dpad];
+        switch (buttonID) {
+            case PVGenesisButtonUp:
+                return [[dpad up] isPressed]?:[[[pad leftThumbstick] up] isPressed];
+            case PVGenesisButtonDown:
+                return [[dpad down] isPressed]?:[[[pad leftThumbstick] down] isPressed];
+            case PVGenesisButtonLeft:
+                return [[dpad left] isPressed]?:[[[pad leftThumbstick] left] isPressed];
+            case PVGenesisButtonRight:
+                return [[dpad right] isPressed]?:[[[pad leftThumbstick] right] isPressed];
+            case PVGenesisButtonA:
+                return [[pad buttonX] isPressed];
+            case PVGenesisButtonB:
+                return [[pad buttonA] isPressed];
+            case PVGenesisButtonC:
+                return [[pad buttonB] isPressed];
+            case PVGenesisButtonX:
+                return [[pad leftShoulder] isPressed];
+            case PVGenesisButtonY:
+                return [[pad buttonY] isPressed];
+            case PVGenesisButtonZ:
+                return [[pad rightShoulder] isPressed];
+            case PVGenesisButtonStart:
+                return [[pad leftTrigger] isPressed];
+            default:
+                break;
+        }
+    }
+    else if ([controller gamepad])
+    {
+        GCGamepad *pad = [controller gamepad];
+        GCControllerDirectionPad *dpad = [pad dpad];
+        switch (buttonID) {
+            case PVGenesisButtonUp:
+                return [[dpad up] isPressed];
+            case PVGenesisButtonDown:
+                return [[dpad down] isPressed];
+            case PVGenesisButtonLeft:
+                return [[dpad left] isPressed];
+            case PVGenesisButtonRight:
+                return [[dpad right] isPressed];
+            case PVGenesisButtonA:
+                return [[pad buttonX] isPressed];
+            case PVGenesisButtonB:
+                return [[pad buttonA] isPressed];
+            case PVGenesisButtonC:
+                return [[pad buttonB] isPressed];
+            case PVGenesisButtonX:
+                return [[pad leftShoulder] isPressed];
+            case PVGenesisButtonY:
+                return [[pad buttonY] isPressed];
+            case PVGenesisButtonZ:
+                return [[pad rightShoulder] isPressed];
+            default:
+                break;
+        }
+    }
+#if TARGET_OS_TV
+    else if ([controller microGamepad])
+    {
+        GCMicroGamepad *pad = [controller microGamepad];
+        GCControllerDirectionPad *dpad = [pad dpad];
+        switch (buttonID) {
+            case PVGenesisButtonUp:
+                return [[dpad up] value] > 0.5;
+                break;
+            case PVGenesisButtonDown:
+                return [[dpad down] value] > 0.5;
+                break;
+            case PVGenesisButtonLeft:
+                return [[dpad left] value] > 0.5;
+                break;
+            case PVGenesisButtonRight:
+                return [[dpad right] value] > 0.5;
+                break;
+            case PVGenesisButtonA:
+                return [[pad buttonA] isPressed];
+                break;
+            case PVGenesisButtonB:
+                return [[pad buttonX] isPressed];
+                break;
+            default:
+                break;
+        }
+    }
+#endif
+
+    return 0;
 }
 
 #pragma mark - State Saving
 
 - (BOOL)saveStateToFileAtPath:(NSString *)path
 {
-	int serial_size = retro_serialize_size();
-    uint8_t *serial_data = (uint8_t *) malloc(serial_size);
-    
-    retro_serialize(serial_data, serial_size);
-	
-	NSError *error = nil;
-	NSData *saveStateData = [NSData dataWithBytes:serial_data length:serial_size];
-	free(serial_data);
-	[saveStateData writeToFile:path
-					   options:NSDataWritingAtomic
-						 error:&error];
-	if (error)
-	{
-		NSLog(@"Error saving state: %@", [error localizedDescription]);
-		return NO;
-	}
-	
-	return YES;
+    @synchronized(self) {
+        int serial_size = retro_serialize_size();
+        uint8_t *serial_data = (uint8_t *) malloc(serial_size);
+        
+        retro_serialize(serial_data, serial_size);
+        
+        NSError *error = nil;
+        NSData *saveStateData = [NSData dataWithBytes:serial_data length:serial_size];
+        free(serial_data);
+        [saveStateData writeToFile:path
+                           options:NSDataWritingAtomic
+                             error:&error];
+        if (error)
+        {
+            DLog(@"Error saving state: %@", [error localizedDescription]);
+            return NO;
+        }
+        
+        return YES;
+    }
 }
 
 - (BOOL)loadStateFromFileAtPath:(NSString *)path
 {
-	NSData *saveStateData = [NSData dataWithContentsOfFile:path];
-	if (!saveStateData)
-	{
-		NSLog(@"Unable to load save state from path: %@", path);
-		return NO;
-	}
-	
-	if (!retro_unserialize([saveStateData bytes], [saveStateData length]))
-	{
-		NSLog(@"Unable to load save state");
-		return NO;
-	}
-	
-	return YES;
+    @synchronized(self) {
+        NSData *saveStateData = [NSData dataWithContentsOfFile:path];
+        if (!saveStateData)
+        {
+            DLog(@"Unable to load save state from path: %@", path);
+            return NO;
+        }
+        
+        if (!retro_unserialize([saveStateData bytes], [saveStateData length]))
+        {
+            DLog(@"Unable to load save state");
+            return NO;
+        }
+        
+        return YES;
+    }
 }
 
 @end

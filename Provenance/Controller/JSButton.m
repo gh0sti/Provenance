@@ -114,7 +114,7 @@
 		[keyPath isEqualToString:@"backgroundImage"] ||
 		[keyPath isEqualToString:@"backgroundImagePressed"])
 	{
-		if (self.pressed)
+		if (_pressed)
 		{
 			[_backgroundImageView setImage:self.backgroundImagePressed];
 		}
@@ -127,66 +127,64 @@
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event
 {
-	self.pressed = YES;
 	if ([self.delegate respondsToSelector:@selector(buttonPressed:)])
 	{
 		[self.delegate buttonPressed:self];
 	}
+    
+    self.pressed = YES;
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event
 {
 	UITouch *touch = [touches anyObject];
-	CGPoint point = [touch locationInView:self];
-	CGFloat width = [self frame].size.width;
-	CGFloat height = [self frame].size.height;
-	
-	if (!self.pressed)
+	CGPoint point = [touch locationInView:[self superview]];
+    CGRect touchArea = CGRectMake(point.x - 10, point.y - 10, 20, 20);
+
+    BOOL pressed = _pressed;
+    
+	if (!pressed)
 	{
-		self.pressed = YES;
+		pressed = YES;
 		if ([self.delegate respondsToSelector:@selector(buttonPressed:)])
 		{
 			[self.delegate buttonPressed:self];
 		}
 	}
-	
-	if (((point.x < 0) || (point.x > width)) || ((point.y < 0) || (point.y > height)))
+
+    if (!CGRectIntersectsRect(touchArea, [self frame]))
 	{
-		if (self.pressed)
+		if (pressed)
 		{
-			self.pressed = NO;
+			pressed = NO;
 			if ([self.delegate respondsToSelector:@selector(buttonReleased:)])
 			{
 				[self.delegate buttonReleased:self];
 			}
 		}
 	}
-	else
-	{
-		self.pressed = YES;
-		if ([self.delegate respondsToSelector:@selector(buttonPressed:)])
-		{
-			[self.delegate buttonPressed:self];
-		}
-	}
+    
+    self.pressed = pressed;
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event
 {
-	self.pressed = NO;
 	if ([self.delegate respondsToSelector:@selector(buttonReleased:)])
 	{
 		[self.delegate buttonReleased:self];
 	}
+    
+    self.pressed = NO;
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event
 {
-	self.pressed = NO;
 	if ([self.delegate respondsToSelector:@selector(buttonReleased:)])
 	{
 		[self.delegate buttonReleased:self];
 	}
+    
+    self.pressed = NO;
 }
 
 @end

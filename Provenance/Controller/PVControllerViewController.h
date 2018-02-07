@@ -9,29 +9,55 @@
 #import <UIKit/UIKit.h>
 #import "JSDPad.h"
 #import "JSButton.h"
+#import "PViCadeController.h"
+#import "PVSettingsModel.h"
 
 @import GameController;
 
-extern NSString * const PVSavedDPadOriginKey;
-extern NSString * const PVSavedButtonOriginKey;
+extern NSString * const PVSavedDPadFrameKey;
+extern NSString * const PVSavedButtonFrameKey;
+extern NSString * const PVSavedControllerFramesKey;
 
 @class PVControllerViewController, PVEmulatorCore;
 
-@protocol PVControllerViewControllerDelegate <NSObject>
+typedef NS_ENUM(NSInteger, PVControllerButton) {
+    PVControllerButtonA,
+    PVControllerButtonB,
+    PVControllerButtonX,
+    PVControllerButtonY,
+    PVControllerButtonLeftShoulder,
+    PVControllerButtonRightShoulder,
+    PVControllerButtonLeftTrigger,
+    PVControllerButtonRightTrigger
+};
 
-- (void)controllerViewControllerDidBeginEditing:(PVControllerViewController *)controllerViewController;
-- (void)controllerViewControllerDidEndEditing:(PVControllerViewController *)controllerViewController;
-- (void)controllerViewControllerDidPressMenuButton:(PVControllerViewController *)controllerViewController;
+@interface PVControllerViewController : UIViewController <JSDPadDelegate, JSButtonDelegate> {
 
-@end
-
-@interface PVControllerViewController : UIViewController <JSDPadDelegate, JSButtonDelegate>
+}
 
 @property (nonatomic, strong) PVEmulatorCore *emulatorCore;
-@property (nonatomic, assign) id <PVControllerViewControllerDelegate> delegate;
-@property (nonatomic, strong) GCController *gameController;
+@property (nonatomic, copy) NSString *systemIdentifier;
+@property (nonatomic, strong) JSDPad *dPad;
+@property (nonatomic, strong) JSDPad *dPad2;
+@property (nonatomic, strong) UIView *buttonGroup;
+@property (nonatomic, strong) JSButton *leftShoulderButton;
+@property (nonatomic, strong) JSButton *rightShoulderButton;
+@property (nonatomic, strong) JSButton *startButton;
+@property (nonatomic, strong) JSButton *selectButton;
+#if !TARGET_OS_TV
+@property (nonatomic, strong) UISelectionFeedbackGenerator *feedbackGenerator;
+#endif
 
-- (id)initWithControlLayout:(NSArray *)controlLayout;
-- (void)editControls;
+- (id)initWithControlLayout:(NSArray *)controlLayout systemIdentifier:(NSString *)systemIdentifier;
+
+- (void)dPad:(JSDPad *)dPad didPressDirection:(JSDPadDirection)direction;
+- (void)dPadDidReleaseDirection:(JSDPad *)dPad;
+- (void)buttonPressed:(JSButton *)button;
+- (void)buttonReleased:(JSButton *)button;
+- (void)pressStartForPlayer:(NSUInteger)player;
+- (void)releaseStartForPlayer:(NSUInteger)player;
+- (void)pressSelectForPlayer:(NSUInteger)player;
+- (void)releaseSelectForPlayer:(NSUInteger)player;
+- (void)vibrate;
 
 @end

@@ -8,15 +8,23 @@
 
 #import "PVEmulatorCore.h"
 #import "NSObject+PVAbstractAdditions.h"
-#import <mach/mach_time.h>
+#import "OERingBuffer.h"
+#import "RealTimeThread.h"
+
 static Class PVEmulatorCoreClass = Nil;
 static NSTimeInterval defaultFrameInterval = 60.0;
+
+NSString *const PVEmulatorCoreErrorDomain = @"com.jamsoftonline.EmulatorCore.ErrorDomain";
+
+@interface PVEmulatorCore()
+@property (nonatomic, assign) CGFloat  framerateMultiplier;
+@end
 
 @implementation PVEmulatorCore
 
 + (void)initialize
 {
-    if(self == [PVEmulatorCore class])
+    if (self == [PVEmulatorCore class])
     {
         PVEmulatorCoreClass = [PVEmulatorCore class];
     }
@@ -28,6 +36,11 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 	{
 		NSUInteger count = [self audioBufferCount];
         ringBuffers = (__strong OERingBuffer **)calloc(count, sizeof(OERingBuffer *));
+        self.emulationLoopThreadLock = [NSLock new];
+        self.frontBufferCondition = [NSCondition new];
+        self.frontBufferLock = [NSLock new];
+        [self setIsFrontBufferReady:NO];
+        _gameSpeed = GameSpeedNormal;
 	}
 	
 	return self;
@@ -35,6 +48,8 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 
 - (void)dealloc
 {
+    [self stopEmulation];
+
 	for (NSUInteger i = 0, count = [self audioBufferCount]; i < count; i++)
 	{
 		ringBuffers[i] = nil;
@@ -47,14 +62,15 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 
 - (void)startEmulation
 {
-	if([self class] != PVEmulatorCoreClass)
+	if ([self class] != PVEmulatorCoreClass)
     {
 		if (!isRunning)
 		{
 			isRunning  = YES;
 			shouldStop = NO;
-			
-			[NSThread detachNewThreadSelector:@selector(frameRefreshThread:) toTarget:self withObject:nil];
+            self.gameSpeed = GameSpeedNormal;
+            [NSThread detachNewThreadSelector:@selector(emulationLoopThread) toTarget:self withObject:nil];
+
 		}
 	}
 }
@@ -85,11 +101,121 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 {
 	shouldStop = YES;
     isRunning  = NO;
+
+    [self.emulationLoopThreadLock lock]; // make sure emulator loop has ended
+    [self.emulationLoopThreadLock unlock];
 }
 
-- (void)frameRefreshThread:(id)anArgument
+- (void)updateControllers
 {
-	[self doesNotImplementSelector:_cmd];
+    //subclasses may implement for polling
+}
+
+- (void) emulationLoopThread {
+
+    // For FPS computation
+    int frameCount = 0;
+    int framesTorn = 0;
+    NSDate *fpsCounter = [NSDate date];
+    
+    //Setup Initial timing
+    NSDate *origin = [NSDate date];
+    NSTimeInterval sleepTime;
+    NSTimeInterval nextEmuTick = GetSecondsSince(origin);
+    
+    [self.emulationLoopThreadLock lock];
+
+    //Become a real-time thread:
+    MakeCurrentThreadRealTime();
+
+    //Emulation loop
+    while (!shouldStop) {
+
+        [self updateControllers];
+        
+        @synchronized (self) {
+            if (isRunning) {
+                [self executeFrame];
+            }
+        }
+        frameCount += 1;
+
+        nextEmuTick += gameInterval;
+        sleepTime = nextEmuTick - GetSecondsSince(origin);
+        
+        NSDate* bufferSwapLimit = [[NSDate date] dateByAddingTimeInterval:sleepTime];
+        if ([self.frontBufferLock tryLock] || [self.frontBufferLock lockBeforeDate:bufferSwapLimit]) {
+            [self swapBuffers];
+            [self.frontBufferLock unlock];
+            
+            [self.frontBufferCondition lock];
+            [self setIsFrontBufferReady:YES];
+            [self.frontBufferCondition signal];
+            [self.frontBufferCondition unlock];
+        } else {
+            [self swapBuffers];
+            ++framesTorn;
+            
+            [self setIsFrontBufferReady:YES];
+        }
+        
+        sleepTime = nextEmuTick - GetSecondsSince(origin);
+        
+        if(sleepTime >= 0) {
+            [NSThread sleepForTimeInterval:sleepTime];
+        }
+        else if (sleepTime < -0.1) {
+            // We're behind, we need to reset emulation time,
+            // otherwise emulation will "catch up" to real time
+            origin = [NSDate date];
+            nextEmuTick = GetSecondsSince(origin);
+        }
+
+        // Compute FPS
+        NSTimeInterval timeSinceLastFPS = GetSecondsSince(fpsCounter);
+        if (timeSinceLastFPS >= 0.5) {
+            self.emulationFPS = (double)frameCount / timeSinceLastFPS;
+            self.renderFPS = (double)(frameCount - framesTorn) / timeSinceLastFPS;
+            frameCount = 0;
+            framesTorn = 0;
+            fpsCounter = [NSDate date];
+        }
+        
+    }
+    
+    [self.emulationLoopThreadLock unlock];
+}
+
+- (void)setGameSpeed:(GameSpeed)gameSpeed
+{
+    _gameSpeed = gameSpeed;
+    
+    switch (gameSpeed) {
+        case GameSpeedSlow:
+            self.framerateMultiplier = 0.2;
+            break;
+        case GameSpeedNormal:
+            self.framerateMultiplier = 1.0;
+            break;
+        case GameSpeedFast:
+            self.framerateMultiplier = 5.0;
+            break;
+    }
+}
+
+- (BOOL)isSpeedModified
+{
+	return self.gameSpeed != GameSpeedNormal;
+}
+
+- (void)setFramerateMultiplier:(CGFloat)framerateMultiplier
+{
+    if ( _framerateMultiplier != framerateMultiplier )
+    {
+        _framerateMultiplier = framerateMultiplier;
+        NSLog(@"multiplier: %.1f", framerateMultiplier);
+    }
+    gameInterval = 1.0 / ([self frameInterval] * framerateMultiplier);
 }
 
 - (void)executeFrame
@@ -97,15 +223,30 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 	[self doesNotImplementOptionalSelector:_cmd];
 }
 
-- (BOOL)loadFileAtPath:(NSString*)path
+- (BOOL)loadFileAtPath:(NSString *)path
 {
-	[self doesNotImplementSelector:_cmd];
-	return NO;
+    [self doesNotImplementSelector:_cmd];
+    return NO;
+}
+
+- (BOOL)loadFileAtPath:(NSString *)path error:(NSError **)error
+{
+    return [self loadFileAtPath:path];
+}
+
+- (BOOL)supportsDiskSwapping
+{
+    return NO;
+}
+
+- (void)swapDisk
+{
+    [self doesNotImplementOptionalSelector:_cmd];
 }
 
 #pragma mark - Video
 
-- (uint16_t *)videoBuffer
+- (const void *)videoBuffer
 {
 	[self doesNotImplementSelector:_cmd];
 	return NULL;
@@ -152,6 +293,15 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 	return defaultFrameInterval;
 }
 
+- (BOOL)isDoubleBuffered {
+    return NO;
+}
+
+- (void)swapBuffers
+{
+    NSAssert(!self.isDoubleBuffered, @"Cores that are double-buffered must implement swapBuffers!");
+}
+
 #pragma mark - Audio
 
 - (double)audioSampleRate
@@ -168,8 +318,7 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 
 - (NSUInteger)audioBufferCount
 {
-	[self doesNotImplementSelector:_cmd];
-	return 0;
+	return 1;
 }
 
 - (void)getAudioBuffer:(void *)buffer frameCount:(NSUInteger)frameCount bufferIndex:(NSUInteger)index
@@ -189,7 +338,7 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 		return [self channelCount];
 	}
 	
-	NSLog(@"Buffer counts greater than 1 must implement %@", NSStringFromSelector(_cmd));
+	DLog(@"Buffer counts greater than 1 must implement %@", NSStringFromSelector(_cmd));
 	[self doesNotImplementSelector:_cmd];
 	
 	return 0;
@@ -212,7 +361,7 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 		return [self audioSampleRate];
 	}
 	
-    NSLog(@"Buffer count is greater than 1, must implement %@", NSStringFromSelector(_cmd));
+    DLog(@"Buffer count is greater than 1, must implement %@", NSStringFromSelector(_cmd));
     [self doesNotImplementSelector:_cmd];
     return 0;
 }
@@ -228,6 +377,12 @@ static NSTimeInterval defaultFrameInterval = 60.0;
 }
 
 #pragma mark - Save States
+
+- (BOOL)autoSaveState
+{
+    NSString *autoSavePath = [[self saveStatesPath] stringByAppendingPathComponent:@"auto.svs"];
+    return [self saveStateToFileAtPath:autoSavePath];
+}
 
 - (BOOL)saveStateToFileAtPath:(NSString *)path
 {
